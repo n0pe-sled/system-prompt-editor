@@ -1,0 +1,10 @@
+# The dsh-system-prompt-editor bundle layer: one row that is BOTH the node-half
+# entry and the browser-roster entry (the client-modules node half scans enabled
+# Loader entries for packages declaring `dsh.client`). Activation is service-
+# availability driven: the plugin injects `settings` and `systemPrompt` (both
+# mounted by dsh-base), and the browser half injects `slots`/`settingsScope`
+# (both mounted by the web-app bundle's client composition).
+
+- insert:
+    - id: system-prompt-editor
+      name: dsh-system-prompt-editor
