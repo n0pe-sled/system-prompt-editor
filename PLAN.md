@@ -191,3 +191,71 @@ system prompt string; the preview covers sections only (`renderPrompt`).
 - Per-agent (scoped) persona overrides from this panel.
 - Live diff highlighting between stored and draft in the preview.
 - Showing runtime-context snapshots in the preview.
+
+---
+
+# V2 (supersedes the three-field scope above): every system-prompt section editable
+
+Match: `/opt/deepseek/deepseek-harness-plugins/system-prompt-editor/HANDOFF.md`
+(ground-truth inventory + design), decisions confirmed with the human:
+Tier A+B hybrid, tool guidance as one band field, state/code-mode sections
+read-only, identity as text override only.
+
+## 1. Objective
+
+Extend the editor from three fields to every stable section of the assembled
+prompt, using the same empty-means-keep-default semantics:
+
+- harness identity (−100), source checkout (−99), web surface (−98),
+  persona (0), file reference (99), tool-guidance band (100–199), deliverables
+  note (190), custom tail (200) — one catalog-driven card each;
+- generic per-section overrides (the `sections` map) so third-party/unknown
+  sections become editable too (Tier B), discovered from the preview response;
+- DSH state/code-mode sections (plan:policy, tools:code-only, tools:sdk)
+  rendered read-only with a "Managed by DSH" badge.
+
+## 2. Design
+
+- `src/shared/catalog.ts` (new, dependency-free, bundled into both halves):
+  band type, section-name/order/label constants, `SECTION_CATALOG` (editable,
+  in render order), `MANAGED_SECTIONS` (read-only), `bandOfSection`,
+  `knownSectionOrder`, `isManagedSection`, `isEditableSection`, plus a
+  `sections`-map storage kind (`field` vs `section`).
+- Settings schema: `sections: Schema.dict(Schema.string()).default({})` added
+  to `{text, persona, toolGuidance}`.
+- `applyOverrides(assembly, overrides, {orderOf})`: new `sections` map —
+  non-empty entry replaces the section by name, or inserts absent ones at the
+  canonical order (first known-later section anchors; unknown order appends).
+  Tool-band collapse and persona/text paths unchanged.
+- Wire: `SystemPromptDrafts`/`SystemPromptStoredValues` gain `sections`
+  (strict `isStringMap` codec on both halves; band codec now accepts the full
+  band set).
+- Host: waterfall listener and preview pass `sections` + `orderOf:
+  knownSectionOrder`; band chips come from the catalog (custom keeps the
+  configurable `order`).
+- Client: Save takes a discriminated `SystemPromptSaveTarget` (field vs
+  section; section saves read-modify-write the `sections` map, empty removes
+  the key); panel renders catalog cards + discovered third-party cards;
+  preview marks managed sections.
+
+## 3. Verification
+
+- `pnpm typecheck && pnpm build && node tests/smoke.mjs` (updated for the map,
+  band set, insertion-at-order, and codec strictness).
+- `node tests/integration-real.mjs` (new): real `dsh-system-prompt` +
+  `dsh-settings-file` in a temp dir — stock assembly byte-identical baseline,
+  stored `sections` replace on the next assembly, custom-section provider
+  stays live, clearing via `replace` restores the baseline, document
+  persisted. Passed.
+- Manual GUI: per-card Save → `$DSH_HOME/settings.yaml` gains `sections:` keys
+  → Preview shows the rewritten band → fresh session log's `request/header`
+  `system` field is the model-visible truth.
+
+## 4. Known limitations (documented, not defects)
+
+- Per-agent (scoped) overrides from the panel: out of scope (machine-global UI
+  contract).
+- Per-tool individual guidance fields, tool-schema editing, runtime-context
+  snapshots: deferred (Tier C in the handoff).
+- Newer dsh (≥ 0.1.5-rc.2) splits persona into prefix/suffix; the catalog
+  recognizes the names for the persona band but the plugin pins 0.1.1-rc.2.

@@ -1198,22 +1198,121 @@ declare class SystemPrompt extends Service {
   assemble(context?: AssembleContext): Promise<PromptAssembly>;
 }
 //#endregion
+//#region src/shared/catalog.d.ts
+/**
+ * Shared section catalog for the System Prompt Editor: the single source of
+ * truth for which assembled-prompt sections this plugin can edit, their
+ * canonical orders, their display labels, and how each value is stored.
+ *
+ * Bundled into BOTH halves (node and browser), so it is deliberately
+ * dependency-free: plain data plus pure helpers. Section names and orders are
+ * internal contracts of the pinned dsh release (`0.1.1-rc.2`); treat this
+ * catalog as version-pinned (see README "Version pinning").
+ *
+ * @module dsh-system-prompt-editor/catalog
+ */
+/** Which band an assembled section belongs to, for the annotated display. */
+type SystemPromptSectionBand =
+/** The fixed harness identity section (order -100). */
+'identity' |
+/** The harness source-checkout line (order -99). */
+'source' |
+/** The web-surface orientation section (order -98). */
+'web-surface' |
+/** The deployment persona section (order 0). */
+'persona' |
+/** The plan-mode policy section (order 50; state-driven). */
+'plan' |
+/** The file-reference note (order 99). */
+'file-reference' |
+/** The code-mode collapse rule (order 99; state/code-mode driven). */
+'code-only' |
+/** Tool-guidance prose: this plugin's replacement or the per-tool sections. */
+'tool-guidance' |
+/** The code SDK guidance (order 150; code-mode driven). */
+'sdk' |
+/** The deliverables note (order 190). */
+'deliverables' |
+/** This plugin's custom text section (configurable order, default 200). */
+'custom' |
+/** Any other plugin's section. */
+'other';
+/** Where one catalog entry's value is stored. */
+type SectionStorage =
+/** A top-level field of the settings namespace section. */
+{
+  readonly kind: 'field';
+  readonly field: 'text' | 'persona' | 'toolGuidance';
+} |
+/** A key of the generic `sections` map, addressed by the section's registry name. */
+{
+  readonly kind: 'section';
+  readonly name: string;
+};
+/** One catalog entry: a section this plugin knows how to represent in the UI. */
+interface SectionCatalogEntry {
+  /** Stable card key, e.g. `field:text` or `section:harness:identity`. */
+  readonly key: string;
+  /** Where the edited value is persisted. */
+  readonly storage: SectionStorage;
+  /** Registry name of the assembled section. */
+  readonly name: string;
+  /** Canonical order, used for chips and for insertion of an absent section. */
+  readonly order: number;
+  /** Card/row title. */
+  readonly label: string;
+  /** One-line explanation under the editor. */
+  readonly caption: string;
+  /** Band classification for the annotated display. */
+  readonly band: SystemPromptSectionBand;
+  /** Whether this plugin offers a text editor for this section. */
+  readonly editable: boolean;
+  /** Optional warning shown with an editable card (machine-critical sections). */
+  readonly caution?: string;
+}
+/** The curated, editable sections (Tier A), in render order. */
+declare const SECTION_CATALOG: readonly SectionCatalogEntry[];
+/** Sections owned by DSH state/code-mode plugins: shown read-only, never edited. */
+declare const MANAGED_SECTIONS: readonly SectionCatalogEntry[];
+/**
+ * Classify one assembled section into the band the UI annotates.
+ * @param name - the section's registry name.
+ * @returns the band.
+ */
+declare function bandOfSection(name: string): SystemPromptSectionBand;
+/**
+ * The canonical order of one known section, when this plugin knows it.
+ * Per-tool guidance sections report the replacement band's order (150);
+ * unknown sections report none.
+ * @param name - the section's registry name.
+ * @returns the canonical order, or `undefined`.
+ */
+declare function knownSectionOrder(name: string): number | undefined;
+//#endregion
 //#region src/shared/overrides.d.ts
 /** One draft/stored override set. A field absent or empty means "leave as-is". */
 interface SystemPromptOverrides {
   /** Replacement text for the order-0 `deployment:persona` section. */
   readonly persona?: string;
-  /** Replacement text for the whole tool-guidance prose band (orders 100–199). */
+  /** Replacement text for the whole tool-guidance prose band (orders 100-199). */
   readonly toolGuidance?: string;
   /** Replacement text for this plugin's custom section. */
   readonly text?: string;
+  /** Per-section replacements keyed by the section's registry name (curated catalog sections and unknown third-party sections). */
+  readonly sections?: Readonly<Record<string, string>>;
 }
 /**
  * Apply non-empty overrides to an assembled prompt, in place.
  * @param assembly - the assembled prompt to mutate.
  * @param overrides - the overrides to apply; empty values leave defaults alone.
+ * @param options - optional insertion-order resolver: given a section name,
+ * returns that section's canonical order (so a section absent from this
+ * assembly - e.g. a per-agent one in the scope-less preview - can be spliced
+ * into the position it would render at). Without it, absent sections append.
  */
-declare function applyOverrides(assembly: PromptAssembly, overrides: SystemPromptOverrides): void;
+declare function applyOverrides(assembly: PromptAssembly, overrides: SystemPromptOverrides, options?: {
+  readonly orderOf?: (name: string) => number | undefined;
+}): void;
 //#endregion
 //#region node_modules/.pnpm/@deepseek-ai+dsh-typert-protocol@0.1.1-rc.2_@deepseek-ai+cordis@4.0.1_@deepseek-ai+dsh-_d8a93c1e0226dfbdafa801afa2319239/node_modules/@deepseek-ai/dsh-typert-protocol/lib/types/types.d.ts
 declare const LOOKUP_HOST: unique symbol;
@@ -1554,7 +1653,7 @@ declare module '@deepseek-ai/cordis' {
 }
 //#endregion
 //#region src/shared/remote.d.ts
-/** The three drafts one Preview click sends (every field, always present). */
+/** The drafts one Preview click sends (every field, always present). */
 interface SystemPromptDrafts {
   /** Custom system prompt text (order-200 section). */
   readonly text: string;
@@ -1562,25 +1661,17 @@ interface SystemPromptDrafts {
   readonly persona: string;
   /** Tool-guidance override (orders 100–199). */
   readonly toolGuidance: string;
+  /** Per-section replacements keyed by registry name (empty value = keep default). */
+  readonly sections: Readonly<Record<string, string>>;
 }
 /** Current stored values (not drafts), for the Load buttons. */
 interface SystemPromptStoredValues {
   readonly text: string;
   readonly persona: string;
   readonly toolGuidance: string;
+  /** Per-section stored overrides keyed by registry name. */
+  readonly sections: Readonly<Record<string, string>>;
 }
-/** Which band an assembled section belongs to, for the annotated display. */
-type SystemPromptSectionBand =
-/** The fixed harness identity section (order −100). */
-'identity' |
-/** The deployment persona section (order 0). */
-'persona' |
-/** Tool-guidance prose: this plugin's replacement or the per-tool sections. */
-'tool-guidance' |
-/** This plugin's custom text section (configurable order, default 200). */
-'custom' |
-/** Any other plugin's section. */
-'other';
 /** One assembled section, with the display order when the plugin knows it. */
 interface SystemPromptPreviewSection {
   /** Registry name of the contributing section. */
@@ -1640,7 +1731,9 @@ interface SettingsSection {
   text: string;
   persona: string;
   toolGuidance: string;
+  /** Per-section overrides keyed by registry name (curated and third-party sections). */
+  sections: Record<string, string>;
 }
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { Config, SettingsSection, type SystemPromptDrafts, type SystemPromptEditorPreviewOutcome, type SystemPromptOverrides, type SystemPromptPreviewResult, type SystemPromptPreviewSection, type SystemPromptSectionBand, type SystemPromptStoredValues, apply, applyOverrides, inject, name };
+export { Config, MANAGED_SECTIONS, SECTION_CATALOG, SettingsSection, type SystemPromptDrafts, type SystemPromptEditorPreviewOutcome, type SystemPromptOverrides, type SystemPromptPreviewResult, type SystemPromptPreviewSection, type SystemPromptSectionBand, type SystemPromptStoredValues, apply, applyOverrides, bandOfSection, inject, knownSectionOrder, name };

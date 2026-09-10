@@ -27,8 +27,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { SystemPromptEditorPanel } from './SystemPromptEditorPanel.tsx'
 import type {
-  SystemPromptEditorPreviewOutcome, SystemPromptEditorSaveOutcome, SystemPromptField,
-  SystemPromptSettingsSection,
+  SystemPromptEditorPreviewOutcome, SystemPromptEditorSaveOutcome,
+  SystemPromptSaveTarget, SystemPromptSettingsSection,
 } from './SystemPromptEditorPanel.tsx'
 import { PREVIEW_DESCRIPTOR } from '../shared/remote.ts'
 import type { SystemPromptDrafts, SystemPromptPreviewResult } from '../shared/remote.ts'
@@ -43,8 +43,8 @@ interface SystemPromptPreviewNamespace {
 }
 
 export type {
-  SystemPromptEditorPreviewOutcome, SystemPromptEditorSaveOutcome, SystemPromptField,
-  SystemPromptSettingsSection,
+  SystemPromptEditorPreviewOutcome, SystemPromptEditorSaveOutcome,
+  SystemPromptSaveTarget, SystemPromptSettingsSection,
 } from './SystemPromptEditorPanel.tsx'
 export type { SystemPromptEditorPanelProps } from './SystemPromptEditorPanel.tsx'
 export type { SystemPromptEditorInjected } from './SystemPromptEditorPanel.tsx'
@@ -63,16 +63,33 @@ export function apply(ctx: ClientContext): void {
   // the slot declaration and cleans up with this fiber.
   const scope = ctx.settingsScope.bind<SystemPromptSettingsSection>({ namespace: 'system-prompt-editor' })
 
-  const save = async (field: SystemPromptField, value: string): Promise<SystemPromptEditorSaveOutcome> => {
+  const save = async (target: SystemPromptSaveTarget, value: string): Promise<SystemPromptEditorSaveOutcome> => {
     try {
-      await scope.set(field, value)
+      if (target.kind === 'field') {
+        await scope.set(target.field, value)
+      } else {
+        // Generic section map: read-modify-write one key. An empty value
+        // removes the key so the stored document carries no stale override.
+        const current = scope.getSnapshot().value?.sections ?? {}
+        const next: Record<string, string> = { ...current }
+        if (value === '') {
+          delete next[target.name]
+        } else {
+          next[target.name] = value
+        }
+        await scope.set('sections', next)
+      }
     } catch (error) {
       return { status: 'error', message: error instanceof Error ? error.message : String(error) }
     }
     // After set() settles, the scope snapshot already reflects the folded
     // write answer or the recovery read — the Host is the only authority on
     // whether the value landed, so it is read back rather than predicted.
-    return scope.getSnapshot().value?.[field] === value
+    const snapshot = scope.getSnapshot()
+    const landed = target.kind === 'field'
+      ? snapshot.value?.[target.field]
+      : (snapshot.value?.sections?.[target.name] ?? '')
+    return landed === value
       ? { status: 'saved' }
       : { status: 'not-applied' }
   }

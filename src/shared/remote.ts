@@ -17,8 +17,13 @@ import type {
   RemoteResult,
   TypertSchema,
 } from '@deepseek-ai/dsh-typert-protocol'
+import { SECTION_BANDS } from './catalog.ts'
+import type { SystemPromptSectionBand } from './catalog.ts'
 
-/** The three drafts one Preview click sends (every field, always present). */
+// Re-exported so existing import sites (panel, host entry) keep one canonical band type.
+export type { SystemPromptSectionBand } from './catalog.ts'
+
+/** The drafts one Preview click sends (every field, always present). */
 export interface SystemPromptDrafts {
   /** Custom system prompt text (order-200 section). */
   readonly text: string
@@ -26,6 +31,8 @@ export interface SystemPromptDrafts {
   readonly persona: string
   /** Tool-guidance override (orders 100–199). */
   readonly toolGuidance: string
+  /** Per-section replacements keyed by registry name (empty value = keep default). */
+  readonly sections: Readonly<Record<string, string>>
 }
 
 /** Current stored values (not drafts), for the Load buttons. */
@@ -33,20 +40,9 @@ export interface SystemPromptStoredValues {
   readonly text: string
   readonly persona: string
   readonly toolGuidance: string
+  /** Per-section stored overrides keyed by registry name. */
+  readonly sections: Readonly<Record<string, string>>
 }
-
-/** Which band an assembled section belongs to, for the annotated display. */
-export type SystemPromptSectionBand =
-  /** The fixed harness identity section (order −100). */
-  | 'identity'
-  /** The deployment persona section (order 0). */
-  | 'persona'
-  /** Tool-guidance prose: this plugin's replacement or the per-tool sections. */
-  | 'tool-guidance'
-  /** This plugin's custom text section (configurable order, default 200). */
-  | 'custom'
-  /** Any other plugin's section. */
-  | 'other'
 
 /** One assembled section, with the display order when the plugin knows it. */
 export interface SystemPromptPreviewSection {
@@ -98,15 +94,23 @@ function isString(value: unknown): value is string {
   return typeof value === 'string'
 }
 
+/** Whether a value is a plain record of strings (the `sections` dict shape). */
+function isStringMap(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every(isString)
+}
+
 /** Boundary validator for the drafts argument. */
 const draftsSchema: TypertSchema<SystemPromptDrafts> = {
   parse(value: unknown): SystemPromptDrafts {
     if (!isRecord(value)) throw new TypeError('drafts must be a plain object')
-    const { text, persona, toolGuidance } = value
+    const { text, persona, toolGuidance, sections } = value
     if (!isString(text) || !isString(persona) || !isString(toolGuidance)) {
       throw new TypeError('drafts.text, drafts.persona and drafts.toolGuidance must all be strings')
     }
-    return { text, persona, toolGuidance }
+    if (!isStringMap(sections)) {
+      throw new TypeError('drafts.sections must be a plain object whose values are all strings')
+    }
+    return { text, persona, toolGuidance, sections }
   },
 }
 
@@ -118,24 +122,27 @@ const resultSchema: TypertSchema<SystemPromptPreviewResult> = {
     if (!isString(rendered)) throw new TypeError('preview result rendered must be a string')
     if (!Array.isArray(sections)) throw new TypeError('preview result sections must be an array')
     if (!isRecord(effective)) throw new TypeError('preview result effective must be a plain object')
-    const { text, persona, toolGuidance } = effective
+    const { text, persona, toolGuidance, sections: effectiveSections } = effective
     if (!isString(text) || !isString(persona) || !isString(toolGuidance)) {
       throw new TypeError('preview result effective fields must all be strings')
+    }
+    if (!isStringMap(effectiveSections)) {
+      throw new TypeError('preview result effective.sections must be a plain object whose values are all strings')
     }
     const parsedSections: SystemPromptPreviewSection[] = sections.map((entry, index) => {
       if (!isRecord(entry) || !isString(entry.name) || !isString(entry.text)) {
         throw new TypeError(`preview result section ${String(index)} must have string name and text`)
       }
       const band = entry.band
-      if (band !== 'identity' && band !== 'persona' && band !== 'tool-guidance'
-        && band !== 'custom' && band !== 'other') {
+      if (typeof band !== 'string' || !(SECTION_BANDS as readonly string[]).includes(band)) {
         throw new TypeError(`preview result section ${String(index)} has an invalid band`)
       }
+      const parsedBand = band as SystemPromptSectionBand
       const order = entry.order
       if (order !== undefined && (typeof order !== 'number' || !Number.isFinite(order))) {
         throw new TypeError(`preview result section ${String(index)} has an invalid order`)
       }
-      const parsed: SystemPromptPreviewSection = { name: entry.name, text: entry.text, band }
+      const parsed: SystemPromptPreviewSection = { name: entry.name, text: entry.text, band: parsedBand }
       const withOrder: SystemPromptPreviewSection = order === undefined
         ? parsed
         : { ...parsed, order }
@@ -144,7 +151,7 @@ const resultSchema: TypertSchema<SystemPromptPreviewResult> = {
     const parsed: SystemPromptPreviewResult = {
       rendered,
       sections: parsedSections,
-      effective: { text, persona, toolGuidance },
+      effective: { text, persona, toolGuidance, sections: effectiveSections },
     }
     if (error === undefined) return parsed
     if (!isString(error)) throw new TypeError('preview result error must be a string')

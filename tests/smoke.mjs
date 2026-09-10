@@ -2,8 +2,8 @@
  * Host-half smoke check for dsh-system-prompt-editor (no test framework):
  * stubs the injected services, calls apply(), and asserts the section
  * registration, the always-current provider behavior, the stored-override
- * waterfall listener, and the preview receiver (full-prompt rendering with
- * drafts applied).
+ * waterfall listener (persona, tool band, and the generic per-section map),
+ * and the preview receiver (full-prompt rendering with drafts applied).
  *
  * Run with: node tests/smoke.mjs (after `pnpm build`; imports lib/index.js)
  */
@@ -15,6 +15,7 @@ import { apply, Config, inject, name, applyOverrides } from '../lib/index.js'
 let storedText = ''
 let storedPersona = ''
 let storedToolGuidance = ''
+let storedSections = {}
 
 /** Captured calls during apply(). */
 const calls = {
@@ -29,15 +30,16 @@ const fakeSettings = {
   register(ns, schema) {
     assert.equal(ns, 'system-prompt-editor')
     assert.equal(typeof schema, 'function') // the schemastery schema is callable
-    // The schema defaults all three fields.
-    assert.deepEqual(schema({}), { text: '', persona: '', toolGuidance: '' })
+    // The schema defaults all fields, including the generic section map.
+    assert.deepEqual(schema({}), { text: '', persona: '', toolGuidance: '', sections: {} })
     return {
-      get: () => ({ text: storedText, persona: storedPersona, toolGuidance: storedToolGuidance }),
+      get: () => ({ text: storedText, persona: storedPersona, toolGuidance: storedToolGuidance, sections: storedSections }),
       watch: () => () => {},
       update: (_ns, patch) => {
         if (patch.text !== undefined) storedText = String(patch.text)
         if (patch.persona !== undefined) storedPersona = String(patch.persona)
         if (patch.toolGuidance !== undefined) storedToolGuidance = String(patch.toolGuidance)
+        if (patch.sections !== undefined) storedSections = { ...patch.sections }
       },
     }
   },
@@ -46,14 +48,17 @@ const fakeSettings = {
 const fakeSystemPrompt = {
   section(section) { calls.sections.push(section) },
   async assemble() {
-    // A realistic global assembly: identity, persona, two tool sections, and
-    // the plugin's custom section, with the loop's global variable providers.
+    // A realistic global assembly: identity, source, persona, two tool
+    // sections, the deliverables note, and the plugin's custom section, with
+    // the loop's global variable providers.
     return {
       sections: [
         { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.' },
+        { name: 'harness:source', text: 'The DeepSeek Harness implementation checkout is at /src.' },
         { name: 'deployment:persona', text: 'You work at Acme.' },
         { name: 'tool:bash', text: 'Run shell commands.' },
         { name: 'tool:read', text: 'Read files.' },
+        { name: 'ui:deliverable-file-references', text: 'Mention primary outputs.' },
         { name: 'user:system-prompt-editor', text: storedText },
       ],
       contexts: [],
@@ -71,11 +76,15 @@ const fakeTypert = {
   register(contribution) { calls.contribution = contribution; return () => Promise.resolve() },
 }
 
+/** Optional soft services the receiver looks up via ctx.get (e.g. the default model). */
+const serviceStubs = {}
+
 const ctx = {
   settings: fakeSettings,
   systemPrompt: fakeSystemPrompt,
   typert: fakeTypert,
   provide(key, value) { calls.provided.push([key, value]) },
+  get(key) { return serviceStubs[key] },
   on(event, listener) {
     assert.equal(event, 'system-prompt/assemble')
     calls.listener = listener
@@ -106,9 +115,7 @@ storedText = ''
 // The stored-override listener is registered.
 assert.equal(typeof calls.listener, 'function', 'the assemble listener is registered')
 
-// Persona override: non-empty stored persona replaces the deployment persona.
-storedPersona = 'You are a terse assistant.'
-const next = async (assembly) => assembly
+// Helper: run the registered listener as the waterfall would.
 const seen = []
 const runListener = (assembly) => {
   const chain = Promise.resolve(calls.listener(assembly, {}, () => Promise.resolve(assembly)))
@@ -116,6 +123,8 @@ const runListener = (assembly) => {
   return chain.then(result => { seen.push(result); return result })
 }
 
+// Persona override: non-empty stored persona replaces the deployment persona.
+storedPersona = 'You are a terse assistant.'
 await runListener({
   sections: [
     { name: 'deployment:persona', text: 'You work at Acme.' },
@@ -148,7 +157,29 @@ assert.deepEqual(seen[1].sections.map(s => [s.name, s.text]), [
   ['user:system-prompt-editor', 'c'],
 ], 'tool band replaced in place, other sections untouched')
 
+// Generic section map: replaces an existing section, inserts an absent one at
+// its canonical order, and leaves the rest alone.
+storedToolGuidance = ''
+storedSections = {
+  'harness:identity': 'Custom identity text.',
+  'harness:source': 'Custom source line.',
+}
+await runListener({
+  sections: [
+    { name: 'harness:identity', text: 'i' },
+    { name: 'deployment:persona', text: 'p' },
+    { name: 'tool:bash', text: 'bash' },
+  ],
+})
+assert.deepEqual(seen[2].sections.map(s => [s.name, s.text]), [
+  ['harness:identity', 'Custom identity text.'],
+  ['harness:source', 'Custom source line.'],
+  ['deployment:persona', 'p'],
+  ['tool:bash', 'bash'],
+], 'sections map replaces and inserts at the catalog order')
+
 // Empty overrides leave defaults untouched (lossless).
+storedSections = {}
 storedPersona = ''
 storedToolGuidance = ''
 await runListener({
@@ -158,7 +189,7 @@ await runListener({
     { name: 'user:system-prompt-editor', text: 'c' },
   ],
 })
-assert.deepEqual(seen[2].sections, [
+assert.deepEqual(seen[3].sections, [
   { name: 'deployment:persona', text: 'You work at Acme.' },
   { name: 'tool:bash', text: 'Run shell commands.' },
   { name: 'user:system-prompt-editor', text: 'c' },
@@ -193,40 +224,85 @@ assert.equal(invocation.parameters[0].codec.mode, 'strict')
 
 // The drafts codec rejects malformed input and accepts well-formed drafts.
 const draftsCodec = invocation.parameters[0].codec.schema
-assert.throws(() => draftsCodec.parse({ text: 42, persona: '', toolGuidance: '' }), /strings/)
+assert.throws(() => draftsCodec.parse({ text: 42, persona: '', toolGuidance: '', sections: {} }), /strings/)
+assert.throws(() => draftsCodec.parse({ text: 't', persona: 'p', toolGuidance: 'g', sections: { 'tool:bash': 42 } }), /sections/)
 assert.deepEqual(
-  draftsCodec.parse({ text: 't', persona: 'p', toolGuidance: 'g' }),
-  { text: 't', persona: 'p', toolGuidance: 'g' },
+  draftsCodec.parse({ text: 't', persona: 'p', toolGuidance: 'g', sections: { 'harness:identity': 'id' } }),
+  { text: 't', persona: 'p', toolGuidance: 'g', sections: { 'harness:identity': 'id' } },
 )
 
-// Preview: drafts applied on top of the stored assembly, full prompt rendered.
+// Preview: drafts applied on top of the stored assembly, full prompt rendered,
+// per-section bands and orders annotated.
 storedText = 'stored custom'
 storedPersona = ''
 storedToolGuidance = ''
+storedSections = {}
 const result = await receiver.preview({
   text: 'draft custom',
   persona: 'draft persona',
   toolGuidance: 'draft tool guidance',
+  sections: {
+    'harness:identity': 'draft identity',
+    'harness:source': 'draft source',
+    'ui:deliverable-file-references': 'draft deliverables',
+  },
 })
 assert.equal(result.rendered, [
-  'You are an AI agent powered by DeepSeek Harness.',
+  'draft identity',
+  'draft source',
   'draft persona',
   'draft tool guidance',
+  'draft deliverables',
   'draft custom',
 ].join('\n\n'))
 assert.equal(result.error, undefined)
 assert.deepEqual(result.sections.map(s => [s.band, s.name]), [
   ['identity', 'harness:identity'],
+  ['source', 'harness:source'],
   ['persona', 'deployment:persona'],
   ['tool-guidance', 'user:tool-guidance'],
+  ['deliverables', 'ui:deliverable-file-references'],
   ['custom', 'user:system-prompt-editor'],
 ])
+assert.equal(result.sections.find(s => s.band === 'identity').order, -100)
+assert.equal(result.sections.find(s => s.band === 'source').order, -99)
 assert.equal(result.sections.find(s => s.band === 'persona').order, 0)
 assert.equal(result.sections.find(s => s.band === 'tool-guidance').order, 150)
+assert.equal(result.sections.find(s => s.band === 'deliverables').order, 190)
 assert.equal(result.sections.find(s => s.band === 'custom').order, 200)
-assert.deepEqual(result.effective, { text: 'stored custom', persona: '', toolGuidance: '' })
+assert.deepEqual(result.effective, { text: 'stored custom', persona: '', toolGuidance: '', sections: {} })
 
-// Preview with an unresolved variable reports error instead of throwing.
+// Sections absent from a scope-less assembly are inserted at catalog order.
+const inserted = await receiver.preview({
+  text: '',
+  persona: '',
+  toolGuidance: '',
+  sections: { 'context:file-reference': 'Draft file note.' },
+})
+const insertedNames = inserted.sections.map(s => s.name)
+const fileIndex = insertedNames.indexOf('context:file-reference')
+assert.ok(fileIndex >= 0, 'the absent file-reference section is inserted')
+assert.ok(fileIndex < insertedNames.indexOf('tool:bash'), 'file-reference (order 99) inserts before the tool band (100+)')
+assert.equal(inserted.sections[fileIndex].band, 'file-reference')
+assert.equal(inserted.sections[fileIndex].order, 99)
+
+// Tool guidance loads from the snapshot: per-agent tool sections are absent
+// from the scope-less assembly, but the earlier runListener calls snapshotted
+// the real band, so the preview replays it in-band.
+const toolPreview = await receiver.preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+const toolNames = toolPreview.sections.map(s => s.name)
+assert.ok(toolNames.includes('tool:bash') && toolNames.includes('tool:read'), 'snapshotted tool guidance is replayed')
+assert.ok(toolNames.indexOf('tool:bash') < toolNames.indexOf('ui:deliverable-file-references'), 'tool band replays before deliverables')
+assert.equal(toolPreview.error, undefined)
+assert.ok(toolPreview.rendered.includes('Run shell commands.'))
+assert.equal(toolPreview.sections.find(s => s.name === 'tool:bash').band, 'tool-guidance')
+
+// Preview is lenient: with the real default-model service present, {{model}}
+// and {{provider}} resolve; scope-less unknowns like {{cwd}} render literally
+// instead of failing (a stock web persona references both {{model}}/{{cwd}}).
+serviceStubs['agentDefaultModel'] = {
+  currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-v4-flash-vision-exp' }),
+}
 fakeSystemPrompt.variablesOverride = { model: undefined, cwd: undefined, provider: undefined }
 const originalAssemble = fakeSystemPrompt.assemble
 fakeSystemPrompt.assemble = async () => ({
@@ -236,21 +312,33 @@ fakeSystemPrompt.assemble = async () => ({
     { name: 'tool:extra', text: 'Uses {{cwd}} and {{model}}.' },
   ],
 })
-const errored = await receiver.preview({ text: '', persona: '', toolGuidance: '' })
-assert.equal(typeof errored.error, 'string')
-assert.match(errored.error, /{{cwd}}/)
-assert.equal(errored.rendered, '')
-// The raw sections are still returned for display.
-assert.ok(errored.sections.some(s => s.name === 'tool:extra'))
+const lenient = await receiver.preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+assert.equal(lenient.error, undefined)
+assert.ok(lenient.rendered.includes('Uses {{cwd}} and deepseek-v4-flash-vision-exp.'))
+assert.ok(lenient.sections.some(s => s.name === 'tool:extra'))
+
+// Without the default-model service, unresolved references still render literally.
+delete serviceStubs['agentDefaultModel']
+const noStub = await receiver.preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+assert.equal(noStub.error, undefined)
+assert.ok(noStub.rendered.includes('Uses {{cwd}} and {{model}}.'))
 fakeSystemPrompt.assemble = originalAssemble
 
-// applyOverrides: no tool sections present → the replacement is appended.
+// applyOverrides: no tool sections present → the replacement is appended;
+// absent sections with no known order append at the end.
 const bare = { sections: [{ name: 'deployment:persona', text: 'p' }] }
 applyOverrides(bare, { toolGuidance: 'g', text: 'c' })
 assert.deepEqual(bare.sections.map(s => [s.name, s.text]), [
   ['deployment:persona', 'p'],
   ['user:tool-guidance', 'g'],
   ['user:system-prompt-editor', 'c'],
+])
+applyOverrides(bare, { sections: { 'third-party:note': 'hello' } }, { orderOf: () => undefined })
+assert.deepEqual(bare.sections.map(s => [s.name, s.text]), [
+  ['deployment:persona', 'p'],
+  ['user:tool-guidance', 'g'],
+  ['user:system-prompt-editor', 'c'],
+  ['third-party:note', 'hello'],
 ])
 
 // Default order when the config is omitted (the loader resolves the schema
