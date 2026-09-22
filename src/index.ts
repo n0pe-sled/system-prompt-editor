@@ -35,6 +35,7 @@ import type {} from '@deepseek-ai/dsh-typert-registry'
 import type { TypertContribution, TypertPackageModel } from '@deepseek-ai/dsh-typert-registry'
 import { bindTypertRemote, type TypertGatewayBinding } from '@deepseek-ai/dsh-typert-protocol'
 import { applyOverrides } from './shared/overrides.ts'
+import type { SystemPromptProfile } from './shared/section.ts'
 import {
   bandOfSection, knownSectionOrder, CUSTOM_SECTION,
   TOOL_GUIDANCE_SECTION, TOOL_SECTION_PREFIX,
@@ -47,6 +48,7 @@ import {
 
 export { applyOverrides } from './shared/overrides.ts'
 export { bandOfSection, knownSectionOrder, SECTION_CATALOG, MANAGED_SECTIONS } from './shared/catalog.ts'
+export type { SystemPromptProfile } from './shared/section.ts'
 export type { SystemPromptSectionBand } from './shared/catalog.ts'
 export type { SystemPromptOverrides } from './shared/overrides.ts'
 export type {
@@ -78,6 +80,8 @@ export interface SettingsSection {
   toolGuidance: string
   /** Per-section overrides keyed by registry name (curated and third-party sections). */
   sections: Record<string, string>
+  /** Named system-prompt profiles: one full editable snapshot per name. */
+  profiles: Record<string, SystemPromptProfile>
 }
 
 /** The live receiver object the gateway dispatches `/api/systemPromptEditorPreview/preview` to. */
@@ -167,11 +171,21 @@ function previewVariableFallbacks(ctx: Context): Record<string, string> {
 
 export function apply(ctx: Context, config: Config) {
   // Durable per-machine storage (provider: dsh-settings-file → $DSH_HOME/settings.yaml).
+  // One saved profile: the full editable snapshot the panel stores under a
+  // name. The generic is the SCHEMA dict, so it stays off: annotating the
+  // const with the value type is what types the fields.
+  const profileSchema = Schema.object({
+    text: Schema.string().default(''),
+    persona: Schema.string().default(''),
+    toolGuidance: Schema.string().default(''),
+    sections: Schema.dict(Schema.string()).default({}),
+  })
   const sectionSchema: z<SettingsSection> = Schema.object({
     text: Schema.string().default(''),
     persona: Schema.string().default(''),
     toolGuidance: Schema.string().default(''),
     sections: Schema.dict(Schema.string()).default({}),
+    profiles: Schema.dict(profileSchema).default({}),
   })
   const scope = ctx.settings.register(NAMESPACE, sectionSchema)
 
