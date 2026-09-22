@@ -7,9 +7,12 @@
  *
  * The bound settings scope is created ONCE in apply (its disposer belongs to
  * this plugin's fiber; observable identity must stay stable across inject
- * factory calls so the renderer's hook binding is cached per source). The
- * `save` callback wraps the scope write and reads the section back afterwards,
- * mirroring the write-back verification pattern of the plugin settings cards.
+ * factory calls so the renderer's hook binding is cached per source). Every
+ * write callback wraps a scope write and reads the section back afterwards,
+ * mirroring the write-back verification pattern of the plugin settings cards:
+ * `save` for one field or section key, `applyAll` for the whole editable
+ * prompt at once, and `saveProfile`/`deleteProfile` for the named snapshots
+ * the panel's dropdown lists.
  *
  * The Remote contribution is mounted lazily: `$mount` starts here (so its
  * effect is fiber-owned and unwinds with the plugin), but its rejection is
@@ -30,6 +33,7 @@ import type {
   SystemPromptEditorPreviewOutcome, SystemPromptEditorSaveOutcome,
   SystemPromptSaveTarget, SystemPromptSettingsSection,
 } from './SystemPromptEditorPanel.tsx'
+import type { SystemPromptProfile } from '../shared/section.ts'
 import { PREVIEW_DESCRIPTOR } from '../shared/remote.ts'
 import type { SystemPromptDrafts, SystemPromptPreviewResult } from '../shared/remote.ts'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
@@ -42,10 +46,38 @@ interface SystemPromptPreviewNamespace {
   preview(drafts: SystemPromptDrafts): Promise<RemoteResult<SystemPromptPreviewResult>>
 }
 
+/** Drop empty section entries: empty already means "keep the default", so storing the key adds nothing. */
+function withoutEmptySections(sections: Readonly<Record<string, string>>): Record<string, string> {
+  const kept: Record<string, string> = {}
+  for (const [name, text] of Object.entries(sections)) {
+    if (text !== '') kept[name] = text
+  }
+  return kept
+}
+
+/** Whether two section maps hold the same names with the same text. */
+function sameStringMap(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const names = Object.keys(left)
+  if (names.length !== Object.keys(right).length) return false
+  return names.every(name => left[name] === right[name])
+}
+
+/** Whether a profile read back from the Host is the profile that was written. */
+function sameProfile(left: SystemPromptProfile, right: SystemPromptProfile): boolean {
+  return left.text === right.text
+    && left.persona === right.persona
+    && left.toolGuidance === right.toolGuidance
+    && sameStringMap(left.sections, right.sections)
+}
+
 export type {
   SystemPromptEditorPreviewOutcome, SystemPromptEditorSaveOutcome,
   SystemPromptSaveTarget, SystemPromptSettingsSection,
 } from './SystemPromptEditorPanel.tsx'
+export type { SystemPromptProfile } from '../shared/section.ts'
 export type { SystemPromptEditorPanelProps } from './SystemPromptEditorPanel.tsx'
 export type { SystemPromptEditorInjected } from './SystemPromptEditorPanel.tsx'
 export type { SystemPromptDrafts } from '../shared/remote.ts'
@@ -94,6 +126,87 @@ export function apply(ctx: ClientContext): void {
       : { status: 'not-applied' }
   }
 
+  /** The saved profiles as the scope currently holds them. */
+  const readProfiles = (): Record<string, SystemPromptProfile> =>
+    scope.getSnapshot().value?.profiles ?? {}
+
+  /**
+   * Write the whole editable prompt in one gesture: the three fields, then the
+   * section map as a WHOLESALE replacement rather than a read-modify-write per
+   * key, so clearing the prompt also drops section keys whose card is no longer
+   * on the page. Empty section entries are filtered out first: empty already
+   * means "keep the default", so storing the key would only add noise.
+   * @param values - every editable field, as the panel's boxes currently hold them.
+   * @returns what the read-back settled as.
+   */
+  const applyAll = async (values: SystemPromptDrafts): Promise<SystemPromptEditorSaveOutcome> => {
+    const sections = withoutEmptySections(values.sections)
+    try {
+      await scope.set('text', values.text)
+      await scope.set('persona', values.persona)
+      await scope.set('toolGuidance', values.toolGuidance)
+      await scope.set('sections', sections)
+    } catch (error) {
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
+    const landed = scope.getSnapshot().value
+    const applied = (landed?.text ?? '') === values.text
+      && (landed?.persona ?? '') === values.persona
+      && (landed?.toolGuidance ?? '') === values.toolGuidance
+      && sameStringMap(landed?.sections ?? {}, sections)
+    return applied ? { status: 'saved' } : { status: 'not-applied' }
+  }
+
+  /**
+   * Persist one named profile, replacing any profile already under that name.
+   * @param name - the profile name the user typed.
+   * @param profile - the snapshot to store under it.
+   * @returns what the read-back settled as.
+   */
+  const saveProfile = async (name: string, profile: SystemPromptProfile): Promise<SystemPromptEditorSaveOutcome> => {
+    const stored: SystemPromptProfile = {
+      text: profile.text,
+      persona: profile.persona,
+      toolGuidance: profile.toolGuidance,
+      sections: withoutEmptySections(profile.sections),
+    }
+    try {
+      await scope.set('profiles', { ...readProfiles(), [name]: stored })
+    } catch (error) {
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
+    const landed = scope.getSnapshot().value?.profiles?.[name]
+    return landed !== undefined && sameProfile(landed, stored)
+      ? { status: 'saved' }
+      : { status: 'not-applied' }
+  }
+
+  /**
+   * Remove one named profile. Deleting a name that is already gone is a
+   * success: the caller asked for an absent profile and got one.
+   * @param name - the profile name to remove.
+   * @returns what the read-back settled as.
+   */
+  const deleteProfile = async (name: string): Promise<SystemPromptEditorSaveOutcome> => {
+    const current = readProfiles()
+    if (!Object.hasOwn(current, name)) return { status: 'saved' }
+    const next = { ...current }
+    delete next[name]
+    try {
+      // Removing the last profile leaves no map worth storing: clear the field
+      // so the document carries no empty key.
+      if (Object.keys(next).length === 0) {
+        await scope.unset('profiles')
+      } else {
+        await scope.set('profiles', next)
+      }
+    } catch (error) {
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
+    const landed = scope.getSnapshot().value?.profiles ?? {}
+    return Object.hasOwn(landed, name) ? { status: 'not-applied' } : { status: 'saved' }
+  }
+
   // Mount the preview Remote for this plugin's fiber. Not awaited: a mount
   // failure (endpoint collision, carrier offline) must only disable Preview,
   // not fail plugin activation. `preview()` awaits this same promise, so the
@@ -135,6 +248,9 @@ export function apply(ctx: ClientContext): void {
     inject: () => ({
       hooks: { systemPromptSettings: scope },
       save,
+      applyAll,
+      saveProfile,
+      deleteProfile,
       preview,
     }),
   }, SystemPromptEditorPanel))
