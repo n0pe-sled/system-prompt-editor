@@ -179,6 +179,9 @@ export function apply(ctx: Context, config: Config) {
     persona: Schema.string().default(''),
     toolGuidance: Schema.string().default(''),
     sections: Schema.dict(Schema.string()).default({}),
+    // Display-only metadata the panel stamps on save; declared so a profile
+    // carrying it survives the section schema unchanged.
+    savedAt: Schema.string(),
   })
   const sectionSchema: z<SettingsSection> = Schema.object({
     text: Schema.string().default(''),

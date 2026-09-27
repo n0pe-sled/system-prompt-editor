@@ -11,6 +11,14 @@
  * @module dsh-system-prompt-editor/section
  */
 
+/**
+ * Name of the profile that holds the user's baseline prompt. The panel creates
+ * it empty on first use and refuses to delete it, so a reset always has
+ * somewhere to land: overwriting it redefines the baseline, and applying it is
+ * what Clear all does after it unsets the live overrides.
+ */
+export const DEFAULT_PROFILE_NAME = 'Default'
+
 /** One saved profile: the full editable system prompt as one snapshot. */
 export interface SystemPromptProfile {
   /** Custom system prompt text (order-200 section). */
@@ -21,4 +29,9 @@ export interface SystemPromptProfile {
   readonly toolGuidance: string
   /** Per-section overrides keyed by registry name (empty value = keep default). */
   readonly sections: Readonly<Record<string, string>>
+  /**
+   * When this snapshot was last written (ISO 8601). Display only: a document
+   * saved before this field existed still loads, it just shows no timestamp.
+   */
+  readonly savedAt?: string
 }

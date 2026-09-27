@@ -259,3 +259,101 @@ prompt, using the same empty-means-keep-default semantics:
   snapshots: deferred (Tier C in the handoff).
 - Newer dsh (≥ 0.1.5-rc.2) splits persona into prefix/suffix; the catalog
   recognizes the names for the persona band but the plugin pins 0.1.1-rc.2.
+
+# V3: the profile toolbar (save all / load all / clear all, plus collapse)
+
+## 1. Objective
+
+Two gaps made the panel less useful than its storage allowed.
+
+First, profiles. The namespace already carried a `profiles` map and the client
+already implemented `applyAll`, `saveProfile`, and `deleteProfile` with
+write-back verification — but `SystemPromptEditorInjected` declared only
+`hooks`, `save`, and `preview`, so none of it reached the component. A machine
+could hold saved profiles that no page could show, load, or delete.
+
+Second, the page was one long column of eight editors with no way to fold any of
+them.
+
+## 2. Design
+
+### 2a. The toolbar
+
+A profile bar sits above every card, because a profile is a property of the
+prompt and not of one section. It holds the profile picker, the name field for a
+new profile, and the actions: Save all, Load all, Clear all, Reload from live
+prompt, New, Delete, and Collapse all / Expand all.
+
+The labels keep two stores apart, and that distinction is the whole design:
+
+- **Save all** writes the boxes into the selected profile. Not the live prompt.
+- **Load all** applies the selected profile to the live prompt and fills the
+  boxes, so switching defaults is one click.
+- **Clear all** unsets the live overrides and leaves the profiles alone.
+- **Reload from live prompt** re-reads the effective text and writes nothing.
+
+### 2b. Default is a profile, not a constant
+
+`DEFAULT_PROFILE_NAME` (`src/shared/section.ts`) names the baseline. The panel
+synthesizes an empty `Default` entry when the document has none, refuses to
+delete it, and offers **Apply Default**. Overwriting it redefines what a reset
+restores; **Clear all** ignores it and goes all the way back to the shipping
+deployment prompt. Both behaviors are wanted, so both exist and the captions say
+which is which.
+
+### 2c. Empty means "unset", not "store an empty string"
+
+`applyAll` used to write `''` for a cleared field. Empty already means "leave
+the deployment default alone" to the override helper, so the model-visible
+result was right either way — but a document that keeps empty keys is a document
+that looks like it refused a clear, and `Clear all` would have had to remove
+them afterwards. `applyAll` now UNSETS a field that is going empty and sets the
+rest. That is what makes Load all of a sparse profile behave.
+
+### 2d. Draft filling must not race the snapshot
+
+An action that filled the boxes left `editStartedFrom` null, expecting the
+adoption effect to sync them. The effect reads the stored value from the
+render-scoped snapshot, which the client scope publishes a render or two after a
+write settles: a card whose stored value had just changed was reset to the stale
+text. Curated cards hid it (their target overlapped what was written); a
+third-party card restored from a profile showed it as an empty box even though
+storage held the value.
+
+`adoptedState()` fixes it by comparing the drafted text against
+`sectionRef.current` — a ref updated every render — at the moment it builds the
+card state. A card whose draft already equals storage is marked unedited; a card
+whose draft differs keeps that draft and is marked edited, which the adoption
+effect skips.
+
+### 2e. Profiles grow cards
+
+A third-party section key in a loaded profile that this visit never discovered
+would be restored to storage invisibly, and the next **Save all** would drop it.
+`profileOnlyCards()` creates a card for it, and Load all warns how many sections
+that affected.
+
+## 3. Verification
+
+- `pnpm typecheck` clean (the pre-change tree did not typecheck: `profiles` was
+  missing from `SystemPromptSettingsSection`, plus unresolved client deps).
+- `node tests/smoke.mjs` extended for the profile map: the registered schema
+  carries `profiles` and a `savedAt` stamp, and a stored profile alone leaves the
+  live prompt at its defaults. Passed.
+- `node tests/integration-real.mjs` passed.
+- Manual GUI on the live build (port 58183) and on an isolated sandbox instance
+  (`DSH_HOME` in a scratch dir, own port) so no destructive action touched the
+  real settings file. Verified per action, each against `settings.yaml`:
+  Save all added the profile and left the live fields byte-identical; Load all
+  wrote all four fields and the section map; Clear all removed every live key
+  and kept `profiles`; Delete removed one profile and nothing else; Delete of
+  Default was refused with a message; Reload wrote nothing at all (file hash
+  unchanged); Collapse all folded all eight cards and one header restored a
+  single card; a profile carrying `third-party:widget-note` grew that card and
+  warned about it.
+
+## 4. Known limitations (documented, not defects)
+
+- Collapsed state is per page visit; it is not persisted.
+- Profiles have no export/import path. They live in the settings document only.
+- A profile still cannot be starred as the auto-load default for new sessions.

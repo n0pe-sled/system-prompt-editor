@@ -3,7 +3,8 @@
  * stubs the injected services, calls apply(), and asserts the section
  * registration, the always-current provider behavior, the stored-override
  * waterfall listener (persona, tool band, and the generic per-section map),
- * and the preview receiver (full-prompt rendering with drafts applied).
+ * the preview receiver (full-prompt rendering with drafts applied), and the
+ * saved-profile map the panel's toolbar round-trips.
  *
  * Run with: node tests/smoke.mjs (after `pnpm build`; imports lib/index.js)
  */
@@ -16,6 +17,8 @@ let storedText = ''
 let storedPersona = ''
 let storedToolGuidance = ''
 let storedSections = {}
+/** Saved profiles, stored exactly as the panel's toolbar writes them. */
+let storedProfiles = {}
 
 /** Captured calls during apply(). */
 const calls = {
@@ -26,20 +29,32 @@ const calls = {
   provided: [],
 }
 
+/** The settings-section schema the plugin registered, for the profile round-trip check. */
+let registeredSchema = null
+
 const fakeSettings = {
   register(ns, schema) {
+    registeredSchema = schema
     assert.equal(ns, 'system-prompt-editor')
     assert.equal(typeof schema, 'function') // the schemastery schema is callable
-    // The schema defaults all fields, including the generic section map.
-    assert.deepEqual(schema({}), { text: '', persona: '', toolGuidance: '', sections: {} })
+    // The schema defaults every field, the generic section map and the
+    // saved-profile map included.
+    assert.deepEqual(schema({}), { text: '', persona: '', toolGuidance: '', sections: {}, profiles: {} })
     return {
-      get: () => ({ text: storedText, persona: storedPersona, toolGuidance: storedToolGuidance, sections: storedSections }),
+      get: () => ({
+        text: storedText,
+        persona: storedPersona,
+        toolGuidance: storedToolGuidance,
+        sections: storedSections,
+        profiles: storedProfiles,
+      }),
       watch: () => () => {},
       update: (_ns, patch) => {
         if (patch.text !== undefined) storedText = String(patch.text)
         if (patch.persona !== undefined) storedPersona = String(patch.persona)
         if (patch.toolGuidance !== undefined) storedToolGuidance = String(patch.toolGuidance)
         if (patch.sections !== undefined) storedSections = { ...patch.sections }
+        if (patch.profiles !== undefined) storedProfiles = { ...patch.profiles }
       },
     }
   },
@@ -351,5 +366,60 @@ assert.equal(calls.sections[0].order, 200)
 // The schema default matches the documented band: 200 (after tool guidance).
 const defaults = Config({})
 assert.equal(defaults.order, 200)
+
+// Saved profiles survive the registered section schema, metadata included: a
+// profile that carried `savedAt` through the schema must still carry it, or the
+// panel's read-back comparison would report a successful save as not-applied.
+assert.equal(typeof registeredSchema, 'function')
+const resolvedProfiles = registeredSchema({
+  profiles: {
+    Default: { text: '', persona: '', toolGuidance: '', sections: {} },
+    'Terse reviewer': {
+      text: 'Be terse.',
+      persona: 'You review code.',
+      toolGuidance: '',
+      sections: { 'harness:identity': 'custom identity' },
+      savedAt: '2026-01-02T03:04:05.000Z',
+    },
+  },
+})
+assert.deepEqual(resolvedProfiles.profiles.Default, { text: '', persona: '', toolGuidance: '', sections: {} })
+assert.equal(resolvedProfiles.profiles['Terse reviewer'].savedAt, '2026-01-02T03:04:05.000Z')
+assert.equal(resolvedProfiles.profiles['Terse reviewer'].sections['harness:identity'], 'custom identity')
+
+// The profile map reaches the provider's update() untouched.
+storedProfiles = { Default: { text: '', persona: '', toolGuidance: '', sections: {} } }
+assert.deepEqual(
+  fakeSettings.register('system-prompt-editor', registeredSchema).get().profiles,
+  { Default: { text: '', persona: '', toolGuidance: '', sections: {} } },
+)
+
+// A profile is inert until it is applied: loading one is a client-side write of
+// the plain fields, so storing it must not change the prompt by itself.
+storedText = ''
+storedPersona = ''
+storedToolGuidance = ''
+storedSections = {}
+await runListener({
+  sections: [
+    { name: 'deployment:persona', text: 'You work at Acme.' },
+    { name: 'user:system-prompt-editor', text: '' },
+  ],
+})
+assert.deepEqual(seen[4].sections.map(s => s.text), ['You work at Acme.', ''], 'a stored profile alone leaves the live prompt at its defaults')
+
+// Loading a profile is exactly a write of its fields: the persona lands, and
+// clearing every field restores the deployment default in the same assembly.
+storedPersona = storedProfiles.Default.persona
+assert.equal(storedPersona, '')
+storedPersona = 'You review code.'
+await runListener({
+  sections: [
+    { name: 'deployment:persona', text: 'You work at Acme.' },
+    { name: 'user:system-prompt-editor', text: '' },
+  ],
+})
+assert.equal(seen[5].sections[0].text, 'You review code.', 'a loaded profile persona replaces the deployment persona')
+storedPersona = ''
 
 console.log('smoke: all assertions passed')

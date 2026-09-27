@@ -40,6 +40,44 @@ and stays inert. Empty stored values leave the deployment defaults untouched,
 so clearing a field restores the original prompt without the plugin ever
 knowing what it was.
 
+Each card collapses on its own header, and **Collapse all** / **Expand all** in
+the toolbar toggles the whole page at once. A collapsed card keeps its title,
+its order chip, and its **Unsaved** badge, and its hint says how many characters
+the hidden draft holds, so a draft can never hide silently.
+
+## Profiles (the toolbar at the top of the page)
+
+The toolbar sits above every card because a profile belongs to the prompt, not
+to one section. Two places hold text and the labels keep them apart: a
+**profile** is the saved library, and the **editor boxes** are the live prompt
+the next assembly reads.
+
+| Action | Behavior |
+|---|---|
+| **Save all** | Writes every editor box into the selected profile, creating it or replacing it (with a confirmation). It does **not** change the live prompt. Pick **New profile…** to name a new one. |
+| **Load all** | Applies the selected profile to the live prompt **and** fills every box with it, so one click switches what the model reads on the next message. |
+| **Clear all** | Unsets every live override, restoring the shipping deployment prompt. Saved profiles survive it. |
+| **Reload from live prompt** | Re-reads what the model would actually read right now into every box, discarding unapplied edits. Reads only; it writes nothing. |
+| **New** | Reveals the name field for a profile **Save all** will create. |
+| **Delete** | Removes the selected profile. The live prompt is unaffected. |
+
+A profile carries the full editable prompt: the three fields plus the section
+map, third-party sections discovered through a preview included. When a loaded
+profile names a section this page has never discovered, the plugin grows a card
+for it and says so, so a section restored to storage is never invisible to the
+next **Save all**.
+
+**Default** is the baseline a reset lands on. It is created empty on first use
+and cannot be deleted: fill the boxes and **Save all** to redefine it, then
+**Apply Default** puts it back. **Clear all** goes further, ignoring the Default
+profile and restoring the shipping deployment prompt.
+
+An empty box in a profile means "leave the deployment default alone", so a
+profile with empty fields never pins a default out of the way. For the same
+reason **Load all** *unsets* a field a profile leaves empty rather than storing
+an empty string: a namespace that keeps empty keys around is a namespace that
+looks like it refused a clear.
+
 ## Install
 
 From the directory that contains `system-prompt-editor/`:
@@ -68,9 +106,10 @@ pnpm build
 - **Storage** — the `system-prompt-editor` namespace of the settings document,
   machine-global like every dsh setting. Under the shipped file provider this
   is `$DSH_HOME/settings.yaml` (section `system-prompt-editor:` with `text:`,
-  `persona:`, `toolGuidance:`, and a `sections:` map keyed by section name,
-  e.g. `harness:identity: "..."`). Saved text survives restarts and is shared
-  by every profile on the machine.
+  `persona:`, `toolGuidance:`, a `sections:` map keyed by section name, e.g.
+  `harness:identity: "..."`, and a `profiles:` map of named snapshots). Saved
+  text survives restarts and is shared by every profile on the machine.
+  Profiles live in the same document: there is no export/import path.
 - **Section catalog** — `src/shared/catalog.ts` pins the editable/read-only
   section names, canonical orders, labels, and warnings of the dsh release
   this build targets; both halves bundle it. The UI renders one card per
@@ -138,6 +177,11 @@ Then open the web GUI → Settings → **System Prompt**: edit, Save, check
 session and ask the model about its system prompt, or export the session log
 and inspect the model-visible messages. Load current system prompt must
 round-trip per field; clearing a field must restore the deployment default.
+For the toolbar: **Save all** must add a key under `profiles:` and leave the
+live fields alone, **Load all** must write the profile's values into the live
+fields, **Clear all** must remove them while leaving `profiles:` intact, and a
+**Delete** of `Default` must be refused. Collapsed state is per page visit; it
+is not remembered across reloads.
 
 ## Development
 
