@@ -357,3 +357,79 @@ that affected.
 - Collapsed state is per page visit; it is not persisted.
 - Profiles have no export/import path. They live in the settings document only.
 - A profile still cannot be starred as the auto-load default for new sessions.
+
+# V4: the preview assembles under the default preset's composition
+
+## 1. Objective
+
+The tool-guidance card showed an empty box and **Load** filled nothing. The
+value is one band, so a user who typed an addition without loading first
+replaced every shipped per-tool section with that one line — the model kept
+reading the shipped guidance out of the textarea and lost everything the
+harness would have generated.
+
+## 2. Why the box was empty
+
+`ctx.systemPrompt.assemble()` with no scope is the wrong assembly on the Web
+surface. Every model-facing row there — `tool-bash` and its guidance, `tool-fs`,
+`tool-subagent`, `tool-skill`, `tool-todo` — is a PRESET row rather than a
+global one, because the Web bundle disables the base's global tool rows and lets
+each session mount a preset instead. A scope-less assembly therefore carries no
+tool band at all, and the plugin had no per-tool text to show.
+
+The previous release papered over this with a snapshot: the waterfall listener
+recorded the tool sections of every real assembly, and the preview replayed the
+recording when its own assembly had no tool band. The recording was made from
+whichever session assembled last, so it could be another preset's band, a child
+agent's restricted band, or an assembly whose own tool sections returned empty
+text — and on a host that had run no session yet it was empty, which is the empty
+box. It also could not follow a composition edit, and it made the preview report
+a band the deployment no longer had.
+
+## 3. Design
+
+`previewScope()` resolves the scope a new session would compose and the preview
+assembles under it:
+
+- the soft `agentPresets` service is read with `ctx.get`, and
+  `standingKeyFor()` composes the roster's default preset — no agent, no
+  session, no turn — so the preview reports the guidance a new session reads,
+  and it follows a composition edit with no restart;
+- a deployment that mounts no roster keeps its model-facing rows in the global
+  layer, where the scope-less assembly already IS the composed prompt, so no
+  scope is the right answer there;
+- a roster whose default preset is unknown or uncomposable cannot answer for a new
+  session either, so the preview falls back to the scope-less assembly and
+  reports that instead of presenting the result as the live prompt.
+
+The snapshot and its replay are gone: they were the workaround for the missing
+scope, and the standing composition is the real answer to the same question.
+
+The result carries `scope: { presetId? , fallback?, reason? }`, which the boundary
+validator requires to name the preset or the fallback, and the panel renders as the
+preview's caption.
+
+## 4. What the panel says
+
+The preview header names the preset composition it assembled under, because the
+scope is the DEFAULT preset: a session that chose another preset, or a child agent
+joined to its parent's composition, reads a different prompt. The preview body
+caption says the same for sections, and the Tool guidance card says Load fills the
+box with the composed band so an addition joins the shipped guidance.
+
+## 5. Verification
+
+- `pnpm typecheck`, `pnpm build`, `node tests/smoke.mjs` — the smoke check
+  covers a roster that answers, a roster that cannot compose, and no roster at
+  all, and rejects a preview result that reports no scope.
+- `node tests/integration-real.mjs` — the real `dsh-system-prompt` registry
+  with a composed component scope, and the byte-identical baseline unchanged.
+- The running Web GUI: Preview names the assembled preset and lists the
+  per-tool guidance sections; Load on Tool guidance fills the box with them.
+
+## 6. Known limitations (documented, not defects)
+
+- The scope is the default preset, not the preset of the session the page was
+  opened from: the settings page is machine-global, and it reads no session.
+- A section a session alone contributes (a per-session value such as `{{cwd}}`, or
+  an agent's own preset) is still absent from the preview.

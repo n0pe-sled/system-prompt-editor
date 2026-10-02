@@ -3,8 +3,9 @@
  * stubs the injected services, calls apply(), and asserts the section
  * registration, the always-current provider behavior, the stored-override
  * waterfall listener (persona, tool band, and the generic per-section map),
- * the preview receiver (full-prompt rendering with drafts applied), and the
- * saved-profile map the panel's toolbar round-trips.
+ * the preview receiver (full-prompt rendering with drafts applied, the scope
+ * it assembled under, and the scope-less fallback), and the saved-profile map
+ * the panel's toolbar round-trips.
  *
  * Run with: node tests/smoke.mjs (after `pnpm build`; imports lib/index.js)
  */
@@ -27,6 +28,8 @@ const calls = {
   receiver: null,
   listener: null,
   provided: [],
+  /** Scope argument of every assembly call; undefined while scope-less. */
+  assembleScopes: [],
 }
 
 /** The settings-section schema the plugin registered, for the profile round-trip check. */
@@ -62,7 +65,8 @@ const fakeSettings = {
 
 const fakeSystemPrompt = {
   section(section) { calls.sections.push(section) },
-  async assemble() {
+  async assemble(assembleContext = {}) {
+    calls.assembleScopes.push(assembleContext.scope)
     // A realistic global assembly: identity, source, persona, two tool
     // sections, the deliverables note, and the plugin's custom section, with
     // the loop's global variable providers.
@@ -301,16 +305,91 @@ assert.ok(fileIndex < insertedNames.indexOf('tool:bash'), 'file-reference (order
 assert.equal(inserted.sections[fileIndex].band, 'file-reference')
 assert.equal(inserted.sections[fileIndex].order, 99)
 
-// Tool guidance loads from the snapshot: per-agent tool sections are absent
-// from the scope-less assembly, but the earlier runListener calls snapshotted
-// the real band, so the preview replays it in-band.
+// Tool guidance is the preset's: the scope-less assembly carries the two tool
+// sections the earlier runListener calls used, and a preview reports that it
+// could not reach a preset composition rather than implying otherwise.
 const toolPreview = await receiver.preview({ text: '', persona: '', toolGuidance: '', sections: {} })
 const toolNames = toolPreview.sections.map(s => s.name)
-assert.ok(toolNames.includes('tool:bash') && toolNames.includes('tool:read'), 'snapshotted tool guidance is replayed')
-assert.ok(toolNames.indexOf('tool:bash') < toolNames.indexOf('ui:deliverable-file-references'), 'tool band replays before deliverables')
+assert.ok(toolNames.includes('tool:bash') && toolNames.includes('tool:read'), 'the global tool sections render')
+assert.ok(toolNames.indexOf('tool:bash') < toolNames.indexOf('ui:deliverable-file-references'), 'the tool band renders before deliverables')
 assert.equal(toolPreview.error, undefined)
 assert.ok(toolPreview.rendered.includes('Run shell commands.'))
 assert.equal(toolPreview.sections.find(s => s.name === 'tool:bash').band, 'tool-guidance')
+// Without a roster the host cannot reach a preset composition, so the preview
+// assembles scope-less and reports that instead of presenting an incomplete
+// prompt as the composed one.
+assert.deepEqual(toolPreview.scope, { fallback: 'no-roster' }, 'a deployment with no roster reports the scope-less assembly')
+assert.equal(calls.assembleScopes.at(-1), undefined, 'a preview without a roster assembles scope-less')
+
+// Preview scope: with a roster mounted the preview assembles under the default
+// preset's standing composition, which is what puts the model-facing rows — the
+// per-tool guidance a session actually reads — in the result instead of an empty
+// band.
+const previewScopeKey = { agentPreset: 'standard' }
+const composedSection = { name: 'tool:composed', text: 'Composed tool guidance.' }
+const globalAssemble = fakeSystemPrompt.assemble
+fakeSystemPrompt.assemble = async (assembleContext = {}) => {
+  const assembly = await globalAssemble.call(fakeSystemPrompt, assembleContext)
+  // A preset composition contributes its model-facing rows to the assembly of the
+  // sessions that joined it, and nothing at all to a scope-less one.
+  return assembleContext.scope === undefined
+    ? assembly
+    : {
+        ...assembly,
+        sections: [
+          ...assembly.sections.slice(0, 1),
+          composedSection,
+          ...assembly.sections.slice(1),
+        ],
+      }
+}
+serviceStubs['agentPresets'] = {
+  standingKeyFor: async () => previewScopeKey,
+  presetIdOf: scope => scope === previewScopeKey ? 'standard' : undefined,
+}
+const scoped = await receiver.preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+assert.equal(calls.assembleScopes.at(-1), previewScopeKey, 'the preview assembles under the default preset scope')
+assert.deepEqual(scoped.scope, { presetId: 'standard' }, 'the preview reports the preset it assembled under')
+assert.deepEqual(scoped.sections.map(s => [s.band, s.name]), [
+  ['identity', 'harness:identity'],
+  ['tool-guidance', 'tool:composed'],
+  ['source', 'harness:source'],
+  ['persona', 'deployment:persona'],
+  ['tool-guidance', 'tool:bash'],
+  ['tool-guidance', 'tool:read'],
+  ['deliverables', 'ui:deliverable-file-references'],
+  ['custom', 'user:system-prompt-editor'],
+], 'the preset-scoped preview carries the composed per-tool band')
+assert.ok(scoped.rendered.includes('Composed tool guidance.'), 'the composed guidance reaches the rendered prompt')
+
+// A roster whose default preset cannot compose reports the failure instead of
+// silently presenting the scope-less assembly as the composed prompt.
+serviceStubs['agentPresets'] = {
+  standingKeyFor: async () => { throw new Error('preset "standard" is missing') },
+}
+const failed = await receiver.preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+assert.deepEqual(failed.scope, {
+  fallback: 'unavailable',
+  reason: 'preset "standard" is missing',
+}, 'an uncomposable default preset is reported, never hidden')
+assert.equal(calls.assembleScopes.at(-1), undefined, 'the fallback assembles scope-less')
+assert.ok(!failed.sections.some(s => s.name === 'tool:scoped'), 'the fallback omits the preset rows it cannot see')
+delete serviceStubs['agentPresets']
+
+// The scope report is part of the wire contract: the result codec requires it
+// and rejects a report that names neither a preset nor a fallback.
+const resultCodec = invocation.result.schema
+assert.throws(() => resultCodec.parse({
+  rendered: '',
+  sections: [],
+  effective: { text: '', persona: '', toolGuidance: '', sections: {} },
+}), /scope/)
+assert.throws(() => resultCodec.parse({
+  rendered: '',
+  sections: [],
+  effective: { text: '', persona: '', toolGuidance: '', sections: {} },
+  scope: { fallback: 'no-such-fallback' },
+}), /scope/)
 
 // Preview is lenient: with the real default-model service present, {{model}}
 // and {{provider}} resolve; scope-less unknowns like {{cwd}} render literally
@@ -421,5 +500,8 @@ await runListener({
 })
 assert.equal(seen[5].sections[0].text, 'You review code.', 'a loaded profile persona replaces the deployment persona')
 storedPersona = ''
+
+// The scope-aware assembly was only for the preview assertions above.
+fakeSystemPrompt.assemble = globalAssemble
 
 console.log('smoke: all assertions passed')

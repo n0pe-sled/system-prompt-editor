@@ -3,8 +3,8 @@
  * boots a real cordis context with the real `dsh-system-prompt` registry and
  * the real file-backed `dsh-settings-file` provider (in a TEMP dir — never
  * $DSH_HOME), mounts this plugin, and asserts on the assembled/rendered prompt
- * before and after a persisted write, including the per-section map and the
- * settings document round-trip.
+ * before and after a persisted write, including the per-section map, the
+ * settings document round-trip, and the scope the preview assembles under.
  *
  * Run with: node tests/integration-real.mjs (after `pnpm build`).
  */
@@ -18,6 +18,7 @@ import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { apply, Config, inject, name } from '../lib/index.js'
 
 // Machine-independent harness checkout: set DSH_HARNESS_CHECKOUT to the dsh
@@ -88,6 +89,61 @@ try {
   await scope.update('system-prompt-editor', { text: 'Custom tail.' })
   const withTail = await ctx.systemPrompt.assemble()
   assert.ok(withTail.sections.some(s => s.name === 'user:system-prompt-editor' && s.text === 'Custom tail.'))
+
+  // The preview assembles under the DEFAULT preset's standing composition.
+  // The section a preset composition contributes is registered through the real
+  // scoped registry here, so the preview reads exactly what a session joined to
+  // that composition reads; the roster that names it is the plugin's own
+  // contract with `dsh-agent-presets` and is a test double, because composing
+  // a real preset is that package's own coverage and not this check's subject.
+  const presetKey = { agentPreset: 'standard' }
+  const component = createScope(ctx, presetKey)
+  let componentRow
+  let failing = false
+  ctx.provide('agentPresets', {
+    standingKeyFor: async id => {
+      assert.equal(id, undefined, 'the preview asks for the roster default preset')
+      if (failing) throw new Error('no such preset')
+      return presetKey
+    },
+    presetIdOf: candidate => candidate === presetKey ? 'standard' : undefined,
+  })
+  try {
+    // A preset row would be a tool plugin there; this is the same registration
+    // that plugin makes, `inject` declaration included.
+    const compose = (promptCtx) => {
+      promptCtx.systemPrompt.section({ name: 'tool:component', order: 106, text: 'Composed tool guidance.' })
+    }
+    componentRow = await component.ctx.plugin({ inject: ['systemPrompt'], apply: compose })
+    const preview = await ctx.get('systemPromptEditorPreview').preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+    assert.equal(preview.error, undefined)
+    assert.deepEqual(preview.scope, { presetId: 'standard' }, 'the preview reports the preset it assembled under')
+    const composed = preview.sections.find(s => s.name === 'tool:component')
+    assert.equal(composed?.text, 'Composed tool guidance.', 'the composed tool guidance reaches the preview')
+    assert.ok(preview.rendered.includes('Composed tool guidance.'), 'and the full rendered prompt')
+    assert.deepEqual(preview.effective, { text: 'Custom tail.', persona: '', toolGuidance: '', sections: {
+      'harness:identity': 'Custom identity.',
+      'harness:source': 'Custom source.',
+    } })
+
+    // A roster whose default preset cannot compose is reported, never hidden:
+    // the fallback is the scope-less assembly, which still carries the stored
+    // overrides through the waterfall, and the next preview recovers once the
+    // roster answers again.
+    failing = true
+    const fallback = await ctx.get('systemPromptEditorPreview').preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+    assert.deepEqual(fallback.scope, { fallback: 'unavailable', reason: 'no such preset' })
+    assert.ok(!fallback.sections.some(s => s.name === 'tool:component'), 'the fallback cannot see the preset rows')
+    assert.equal(fallback.sections.find(s => s.name === 'harness:identity')?.text, 'Custom identity.')
+    assert.equal(renderPrompt(await ctx.systemPrompt.assemble()), renderPrompt(withTail), 'the fallback is the scope-less assembly')
+    failing = false
+    const recovered = await ctx.get('systemPromptEditorPreview').preview({ text: '', persona: '', toolGuidance: '', sections: {} })
+    assert.deepEqual(recovered.scope, { presetId: 'standard' }, 'the preview recovers once the preset composes')
+    assert.equal(recovered.sections.find(s => s.name === 'tool:component')?.text, 'Composed tool guidance.')
+  } finally {
+    await componentRow?.dispose()
+    component.rawDispose()
+  }
 
   // Clearing the map restores the deployment text byte-for-byte. `replace` is
   // the wholesale reset — a deep-merge `update({sections:{}})` cannot delete

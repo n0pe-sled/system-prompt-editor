@@ -56,6 +56,19 @@ export interface SystemPromptPreviewSection {
   readonly band: SystemPromptSectionBand
 }
 
+/** The scope one preview assembly ran under. */
+export interface SystemPromptPreviewScope {
+  /**
+   * The preset composition the preview assembled under. Absent when no scope
+   * was available — {@link fallback} is then always present.
+   */
+  readonly presetId?: string
+  /** Why the preview assembled scope-less instead of under a preset. */
+  readonly fallback?: 'no-roster' | 'unavailable'
+  /** The failed preset lookup's message; only with `fallback: 'unavailable'`. */
+  readonly reason?: string
+}
+
 /** The full-prompt preview response. */
 export interface SystemPromptPreviewResult {
   /** The full assembled prompt with drafts applied, variables interpolated. */
@@ -64,6 +77,8 @@ export interface SystemPromptPreviewResult {
   readonly sections: readonly SystemPromptPreviewSection[]
   /** Current stored values (stored, not draft) for the Load buttons. */
   readonly effective: SystemPromptStoredValues
+  /** The scope this assembly ran under, for the preview's own caption. */
+  readonly scope: SystemPromptPreviewScope
   /** Present when strict variable interpolation failed (rendered then empty). */
   readonly error?: string
 }
@@ -114,14 +129,31 @@ const draftsSchema: TypertSchema<SystemPromptDrafts> = {
   },
 }
 
+/** Whether a value is a preview scope report with the fields it claims. */
+function isScopeReport(value: unknown): value is SystemPromptPreviewScope {
+  if (!isRecord(value)) return false
+  const { presetId, fallback, reason } = value
+  if (presetId !== undefined && !isString(presetId)) return false
+  if (fallback !== undefined && fallback !== 'no-roster' && fallback !== 'unavailable') return false
+  if (reason !== undefined && !isString(reason)) return false
+  // The report names the preset it assembled under, or why it could not.
+  return (presetId === undefined) !== (fallback === undefined)
+}
+
 /** Boundary validator for the preview result. */
 const resultSchema: TypertSchema<SystemPromptPreviewResult> = {
   parse(value: unknown): SystemPromptPreviewResult {
     if (!isRecord(value)) throw new TypeError('preview result must be a plain object')
-    const { rendered, sections, effective, error } = value
+    const { rendered, sections, effective, scope, error } = value
     if (!isString(rendered)) throw new TypeError('preview result rendered must be a string')
     if (!Array.isArray(sections)) throw new TypeError('preview result sections must be an array')
     if (!isRecord(effective)) throw new TypeError('preview result effective must be a plain object')
+    if (!isRecord(scope)) throw new TypeError('preview result scope must be a plain object')
+    const report = scope as SystemPromptPreviewScope
+    if (!isScopeReport(report)) {
+      throw new TypeError('preview result scope must name the preset it assembled under, or why it assembled scope-less')
+    }
+    const { presetId, fallback, reason } = report
     const { text, persona, toolGuidance, sections: effectiveSections } = effective
     if (!isString(text) || !isString(persona) || !isString(toolGuidance)) {
       throw new TypeError('preview result effective fields must all be strings')
@@ -152,6 +184,11 @@ const resultSchema: TypertSchema<SystemPromptPreviewResult> = {
       rendered,
       sections: parsedSections,
       effective: { text, persona, toolGuidance, sections: effectiveSections },
+      scope: {
+        ...presetId === undefined ? {} : { presetId },
+        ...fallback === undefined ? {} : { fallback },
+        ...reason === undefined ? {} : { reason },
+      },
     }
     if (error === undefined) return parsed
     if (!isString(error)) throw new TypeError('preview result error must be a string')
