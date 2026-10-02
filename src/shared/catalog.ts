@@ -189,7 +189,8 @@ export const SECTION_CATALOG: readonly SectionCatalogEntry[] = [
     label: 'Tool guidance',
     band: 'tool-guidance',
     editable: true,
-    caption: 'Replaces the per-tool guidance sections when non-empty; empty keeps the defaults.',
+    caption: 'Replaces every per-tool guidance section with this one when non-empty; empty keeps the defaults. Load fills the box with the guidance the default preset composes today, so it is edited rather than rewritten from nothing.',
+    caution: 'Each per-tool section carries that tool\'s cross-call guidance, and saving here replaces all of them with one block. Load the current prompt first unless the replacement is meant to stand alone.',
   },
   {
     key: `section:${DELIVERABLES_SECTION}`,

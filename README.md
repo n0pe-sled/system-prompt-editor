@@ -14,7 +14,7 @@ and the custom tail — plus third-party sections discovered through a preview.
 | **Web surface** | order −98 | Replaces the web-surface orientation section. |
 | **Persona** | order 0 | Replaces the deployment persona section. |
 | **File-reference note** | order 99 | Replaces the note about mentioning created/modified files. |
-| **Tool guidance** | orders 100–199 | Replaces the per-tool guidance prose sections with one section. |
+| **Tool guidance** | orders 100–199 | Replaces every per-tool guidance prose section with this one section. |
 | **Deliverables note** | order 190 | Replaces the response-format note about mentioning primary outputs. |
 | **Custom system prompt text** | order 200 | Appended verbatim after the persona and tool guidance. |
 
@@ -31,8 +31,8 @@ overriding them would fight their owning plugins.
 | Action | Behavior |
 |---|---|
 | **Save** | Persists the draft into the `system-prompt-editor` settings namespace. Confirms with "Saved", or reports when the write did not land (host-side refusal / revision conflict) and keeps the draft so nothing is lost. |
-| **Preview system prompt** | Shows the **entire assembled prompt** as the model would see it — every section, with the current drafts applied — annotated per band, with DSH-managed sections marked. `{{model}}`/`{{provider}}` resolve from the real default-model selection; references with no scope-less value (like `{{cwd}}`) render literally instead of erroring. Third-party sections seen in the preview become editable cards (generic per-section overrides). |
-| **Load current system prompt** | Fetches that section's **current effective text** with a fresh host-side assembly (no drafts) and loads it into the editor — the stored override when one exists, otherwise the deployment default — so the textarea holds what the model actually reads today, ready to edit and save. Saving the loaded default stores it as a fixed override; clearing back to empty restores the default. |
+| **Preview system prompt** | Shows the **entire assembled prompt** as the model would see it — every section, with the current drafts applied — annotated per band, with DSH-managed sections marked. The host assembles it **under the default preset's standing composition**, so the per-tool guidance and the other model-facing rows are the ones a new session reads rather than an empty band; a deployment that mounts no preset roster (or whose default preset cannot compose) assembles scope-less instead and the preview says which. `{{model}}`/`{{provider}}` resolve from the real default-model selection; references with no scope-less value (like `{{cwd}}`) render literally instead of erroring. Third-party sections seen in the preview become editable cards (generic per-section overrides). |
+| **Load current system prompt** | Fetches that section's **current effective text** with a fresh host-side assembly (no drafts) and loads it into the editor — the stored override when one exists, otherwise the composed default — so the textarea holds what the model actually reads today, ready to edit and save. Saving the loaded default stores it as a fixed override; clearing back to empty restores the default. For **Tool guidance** this is how the shipped band is edited rather than overwritten: Load fills the box with every per-tool section the default preset composes, and saving the edited box replaces the whole band with it. |
 
 While the settings scope is loading, the actions are disabled; in a remote
 (non-loopback) browser the page shows a note that settings are process-local
@@ -127,24 +127,28 @@ pnpm build
   (orders 100–199) into one `user:tool-guidance` section at order 150, and
   applies every non-empty `sections[name]` entry — replacing the assembled
   section of that name in place, or inserting it at its catalog order when
-  absent (per-agent sections like the file-reference note, which register
-  scoped, are replaced in real sessions and only appear as insertions in the
-  scope-less preview). Tool *schemas* are never touched; empty stored values
-  leave the defaults alone.
+  absent. Tool *schemas* are never touched; empty stored values leave the
+  defaults alone.
 - **Preview endpoint** — a runtime-registered Typert invocation
   (`systemPromptEditorPreview/preview`) assembles the full prompt host-side
   (stored values flow through the waterfall), applies the drafts, and renders
   leniently (`{{model}}`/`{{provider}}` come from the real default-model
   selection; any other unresolved reference stays literal — a stock web
   persona references `{{model}}`/`{{cwd}}`, and `{{cwd}}` is only knowable
-  per session), returning `{ rendered, sections, effective }`. The client
-  mounts the same descriptor and unwraps the `RemoteResult`. The preview
-  assembles without a specific agent, so per-agent presets may differ (noted
-  in the UI caption); per-agent sections absent from a scope-less assembly are
-  shown as inserts in their canonical band. The per-tool guidance sections
-  register per agent too — the waterfall listener snapshots them from every
-  real assembly, and the preview replays that snapshot in-band, which is also
-  what the tool-guidance card's Load fills when nothing is stored.
+  per session), returning `{ rendered, sections, effective, scope }`. The client
+  mounts the same descriptor and unwraps the `RemoteResult`.
+- **Preview scope** — the preview reads the soft `agentPresets` service and
+  assembles under `standingKeyFor()`, the standing composition of the roster's
+  default preset: the one a new session composes. On the Web surface the
+  model-facing rows — tools, their guidance sections, skill, todo — are preset
+  rows rather than global ones, so a scope-less assembly reports an empty tool
+  band; the standing scope is what makes Preview and Load report the guidance a
+  session actually reads, and follow a composition edit with no session at all.
+  The scope is composed without an agent, a session, or a turn, and nothing is
+  assembled for a session that named another preset — the panel says which preset
+  answered, and when the preset cannot be composed it reports that the preview
+  fell back to the scope-less assembly (the `scope` field of the result) rather
+  than presenting an incomplete prompt as the live one.
 - **Config** — `order: 200` in the plugin row config (profile
   `cordis.patch.yml` or a `--patch` overlay) moves the custom section; the
   schema default is 200.
@@ -162,7 +166,14 @@ pnpm build
   to `dsh 0.1.1-rc.2` (see `src/shared/catalog.ts`); bump the pin and review
   the catalog when upgrading the harness. Newer dsh split the persona into
   prefix/suffix sections — the catalog recognizes those names for the persona
-  band but does not add overrides for them.
+  band but does not add overrides for them. The preview reads the `agentPresets`
+  service name and its `standingKeyFor()` method through `ctx.get`, so a harness
+  that renames either one degrades the preview to the scope-less assembly rather
+  than failing the page.
+- **Preview reads the DEFAULT preset**: the preview shows what a new session
+  composes when it names no preset. A session that chose another preset, or a
+  child agent joined to its parent's composition, may read different guidance;
+  the panel names the preset it assembled under so the difference is visible.
 
 ## Verify
 
@@ -177,6 +188,10 @@ Then open the web GUI → Settings → **System Prompt**: edit, Save, check
 session and ask the model about its system prompt, or export the session log
 and inspect the model-visible messages. Load current system prompt must
 round-trip per field; clearing a field must restore the deployment default.
+**Preview system prompt** must name the preset it assembled under and show the
+per-tool guidance sections the new session reads; **Load** on the Tool guidance
+card must fill the box with that same band, and Save must then replace the band
+with the box's contents.
 For the toolbar: **Save all** must add a key under `profiles:` and leave the
 live fields alone, **Load all** must write the profile's values into the live
 fields, **Clear all** must remove them while leaving `profiles:` intact, and a

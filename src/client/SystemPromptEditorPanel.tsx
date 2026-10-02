@@ -39,7 +39,7 @@ import {
 import { DEFAULT_PROFILE_NAME } from '../shared/section.ts'
 import type { SystemPromptProfile } from '../shared/section.ts'
 import type {
-  SystemPromptDrafts, SystemPromptPreviewResult, SystemPromptSectionBand,
+  SystemPromptDrafts, SystemPromptPreviewResult, SystemPromptPreviewScope, SystemPromptSectionBand,
 } from '../shared/remote.ts'
 
 /** The settings section this plugin stores: three free-text fields plus a generic section map. */
@@ -196,11 +196,11 @@ const EMPTY_DRAFTS: SystemPromptDrafts = { text: '', persona: '', toolGuidance: 
 
 /**
  * The effective text of one card target from a fresh assembly: the stored
- * override when one exists, otherwise the deployment default. Field targets
- * map to their registry section; the tool band falls back to joining the
- * per-tool guidance sections when no replacement is stored. Returns undefined
- * when the assembly has no text for the target (custom section by default,
- * per-agent sections absent from the scope-less preview).
+ * override when one exists, otherwise the default the assembly carried. Field
+ * targets map to their registry section; the tool band joins the per-tool
+ * guidance sections when no replacement is stored. Returns undefined when the
+ * assembly has no text for the target (custom section by default, and any
+ * section the assembled composition does not contribute at all).
  */
 function effectiveText(result: SystemPromptPreviewResult, target: SystemPromptSaveTarget): string | undefined {
   if (target.kind === 'section') {
@@ -223,6 +223,25 @@ function storedTextOf(section: SystemPromptSettingsSection | undefined, target: 
   if (section === undefined) return ''
   if (target.kind === 'field') return section[target.field] ?? ''
   return section.sections?.[target.name] ?? ''
+}
+
+/**
+ * What a preview assembled under, as one sentence: the preset composition that
+ * answered, or why the host could not reach one. A scope-less preview reports a
+ * prompt no session reads — the model-facing rows belong to a preset — so the
+ * page says so instead of presenting the result as the live prompt.
+ * @param scope - the scope report from the preview result.
+ * @returns the sentence, or null when the preview reported no scope at all.
+ */
+function scopeNotice(scope: SystemPromptPreviewScope | undefined): string | null {
+  if (scope === undefined) return null
+  if (scope.presetId !== undefined) {
+    return `Assembled under the "${scope.presetId}" preset — the composition a new session composes by default. A session using another preset may differ.`
+  }
+  if (scope.fallback === 'no-roster') {
+    return 'This deployment mounts no preset roster, so the preview assembled globally: every model-facing row sits in the global layer there.'
+  }
+  return `The default preset could not be composed, so the preview assembled globally and omits every model-facing row a preset owns${scope.reason === undefined ? '' : ` (${scope.reason})`}.`
 }
 
 /** Read one profile out of the snapshot, filling the absent fields with empty text. */
@@ -684,10 +703,10 @@ export function SystemPromptEditorPanel(props: SystemPromptEditorPanelProps) {
       } else if (picked !== undefined && picked !== '' && storedValue === '') {
         loadNote = 'No stored value — loaded the current default section text. Saving stores it as a fixed override.'
       } else if (picked === undefined && storedValue === '' && card.target.kind === 'field' && card.target.field === 'toolGuidance') {
-        loadNote = 'No stored value, and no tool-guidance sections are visible yet — they register per agent. '
-          + 'Run one session first: the plugin snapshots the real per-tool guidance during assembly, and Load will then replay it.'
+        loadNote = 'No stored value, and the preview reported no tool-guidance sections — the composed preset contributes none. '
+          + 'Preview shows the full prompt it assembled.'
       } else if (picked === undefined && storedValue === '') {
-        loadNote = 'Nothing to load — no stored value, and this preview has no text for the section (it may be per-agent or empty). '
+        loadNote = 'Nothing to load — no stored value, and this preview has no text for the section (the composed preset may not contribute it). '
           + 'Use Preview to see the full prompt.'
       }
       setDrafts(current => ({
@@ -999,7 +1018,8 @@ export function SystemPromptEditorPanel(props: SystemPromptEditorPanelProps) {
       <h2 style={styles.title}>System prompt</h2>
       <p style={styles.hint}>
         Every editable section of the assembled system prompt of a new session.
-        Preview shows the FULL prompt as the model sees it, with your drafts
+        Preview shows the FULL prompt as the model sees it, composed from the
+        default preset so the per-tool guidance is the real one, with your drafts
         applied. DSH-managed sections (plan mode, code mode) are read-only.
       </p>
       {snapshot.status === 'loading'
@@ -1267,6 +1287,9 @@ export function SystemPromptEditorPanel(props: SystemPromptEditorPanelProps) {
             {preview.result !== null
               ? (
                 <>
+                  {scopeNotice(preview.result.scope) !== null
+                    ? <p style={styles.hint}>{scopeNotice(preview.result.scope)}</p>
+                    : null}
                   {preview.result.error
                     ? (
                       <>
@@ -1297,9 +1320,10 @@ export function SystemPromptEditorPanel(props: SystemPromptEditorPanelProps) {
                     (e.g. {'{{model}}'}, {'{{provider}}'}) resolve from the
                     default model selection where it exists; a reference with
                     no scope-less value (like {'{{cwd}}'}) stays literal here
-                    and resolves per session. This preview assembles without a
-                    specific agent, so per-agent presets and per-agent
-                    sections (like the file-reference note) may differ.
+                    and resolves per session. The preview carries the preset
+                    composition named above but no specific agent, so sections a
+                    session alone contributes (a per-session value, or an agent's
+                    own preset) may differ.
                   </p>
                 </>
               )

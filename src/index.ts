@@ -15,8 +15,10 @@
  *   section — via {@link applyOverrides}, the same helper the preview
  *   endpoint reuses with drafts;
  * - a runtime-registered Typert endpoint (`systemPromptEditorPreview/preview`)
- *   that assembles the full prompt, applies draft overrides, renders it, and
- *   returns the whole model-visible prompt plus a per-section breakdown.
+ *   that assembles the full prompt under the default preset's standing
+ *   composition, applies draft overrides, renders it, and returns the whole
+ *   model-visible prompt plus a per-section breakdown and the scope it
+ *   assembled under.
  *
  * The editable section surface is driven by the shared catalog
  * ({@link ./shared/catalog.ts}), which pins the section names/orders of the
@@ -30,6 +32,8 @@ import type { PromptAssembly, AssembledSection } from '@deepseek-ai/dsh-system-p
 // Type-only: pull the ctx.settings / ctx.systemPrompt Context merges.
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+// Type-only: the opaque scope key `assemble` and the roster both address.
+import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 // Type-only: the ctx.typert.register() augmentation and TypertContribution.
 import type {} from '@deepseek-ai/dsh-typert-registry'
 import type { TypertContribution, TypertPackageModel } from '@deepseek-ai/dsh-typert-registry'
@@ -38,11 +42,11 @@ import { applyOverrides } from './shared/overrides.ts'
 import type { SystemPromptProfile } from './shared/section.ts'
 import {
   bandOfSection, knownSectionOrder, CUSTOM_SECTION,
-  TOOL_GUIDANCE_SECTION, TOOL_SECTION_PREFIX,
 } from './shared/catalog.ts'
 import {
   PREVIEW_DESCRIPTOR, PREVIEW_SERVICE,
-  type SystemPromptDrafts, type SystemPromptPreviewResult, type SystemPromptPreviewSection,
+  type SystemPromptDrafts, type SystemPromptPreviewResult, type SystemPromptPreviewScope,
+  type SystemPromptPreviewSection,
   type SystemPromptSectionBand, type SystemPromptStoredValues,
 } from './shared/remote.ts'
 
@@ -153,6 +157,17 @@ interface AgentDefaultModelFacade {
 }
 
 /**
+ * The soft `agentPresets` service face (mounted by dsh-agent-presets). Only the
+ * two host reads this plugin needs are typed: composing the roster's default
+ * preset without starting an agent, a session, or a turn, and naming the preset
+ * one standing scope belongs to.
+ */
+interface AgentPresetsFacade {
+  standingKeyFor(id?: string): Promise<ScopeKey>
+  presetIdOf(standingKey: ScopeKey): string | undefined
+}
+
+/**
  * Best-effort preview context: a scope-less assembly lacks the per-agent
  * `{{model}}`/`{{provider}}` values, but the machine-global default model
  * selection is real and cheap to read. `{{cwd}}` has no scope-less source
@@ -166,6 +181,65 @@ function previewVariableFallbacks(ctx: Context): Record<string, string> {
   return {
     provider: selection.provider,
     model: selection.model,
+  }
+}
+
+/** The preset a preview assembled under, and why a scope-less one was used instead. */
+interface PreviewScope {
+  /** Scope whose preset composition the preview assembled under. */
+  readonly scope?: ScopeKey
+  /** The preset id that scope composes, for the preview's own caption. */
+  readonly presetId?: string
+  /** Why no preset scope was available, for the preview's own caption. */
+  readonly fallback?: 'no-roster' | 'unavailable'
+  /** The failed preset lookup's message; only with `fallback: 'unavailable'`. */
+  readonly reason?: string
+}
+
+/**
+ * The scope a preview must assemble under: the default preset's standing
+ * composition.
+ *
+ * On the Web surface the model-facing rows — tools and their guidance sections,
+ * skill, todo, and the rest — belong to an AGENT, so they are mounted inside a
+ * preset composition rather than the global layer. A scope-less assembly therefore
+ * reports an empty tool band, and this plugin's tool-guidance card could only
+ * ever show a snapshot of whichever session assembled last. Assembling under the
+ * default preset's standing scope reports the tool guidance a new session would
+ * actually read today, and follows a composition edit with no session at all.
+ *
+ * Falling back to the scope-less assembly is deliberate, never silent: the result
+ * carries which of the two it was, so the panel can say so.
+ * @param ctx - the plugin context.
+ * @returns the scope to assemble under, or the reason there is none.
+ */
+async function previewScope(ctx: Context): Promise<PreviewScope> {
+  const roster = ctx.get('agentPresets') as AgentPresetsFacade | undefined
+  // No roster mounted: every model-facing row sits in the global layer there, so
+  // the scope-less assembly already IS the composed prompt.
+  if (roster === undefined) return { fallback: 'no-roster' }
+  try {
+    const scope = await roster.standingKeyFor()
+    const presetId = roster.presetIdOf(scope)
+    return { scope, ...presetId === undefined ? {} : { presetId } }
+  } catch (error) {
+    // A roster whose default preset is unknown or uncomposable cannot answer for
+    // a new session either; the scope-less assembly is the honest remainder.
+    return { fallback: 'unavailable', reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * The wire report of one preview assembly's scope: which preset composition
+ * answered, or why the preview fell back to a scope-less assembly.
+ * @param under - the resolved preview scope.
+ * @returns the report the panel captions the preview with.
+ */
+function previewScopeReport(under: PreviewScope): SystemPromptPreviewScope {
+  return {
+    ...under.fallback === undefined ? {} : { fallback: under.fallback },
+    ...under.presetId === undefined ? {} : { presetId: under.presetId },
+    ...under.reason === undefined ? {} : { reason: under.reason },
   }
 }
 
@@ -192,13 +266,6 @@ export function apply(ctx: Context, config: Config) {
   })
   const scope = ctx.settings.register(NAMESPACE, sectionSchema)
 
-  // Deployment per-tool guidance snapshot. The per-tool sections register per
-  // agent, so a scope-less assembly (the preview) never contains them; the
-  // waterfall listener below sees EVERY assembly — real sessions included —
-  // and snapshots the last real per-tool guidance here, so the preview and the
-  // tool-guidance Load have a faithful band to show instead of nothing.
-  const toolGuidanceSnapshot = new Map<string, string>()
-
   // One registration, always current: text is a provider evaluated at each assembly.
   ctx.systemPrompt.section({
     name: CUSTOM_SECTION,
@@ -212,13 +279,6 @@ export function apply(ctx: Context, config: Config) {
   // untouched.
   ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
     const stored = scope.get()
-    // Snapshot the deployment band BEFORE the stored override collapses it, so
-    // the preview/Load always has the real per-tool guidance available.
-    for (const section of assembly.sections) {
-      if (section.name.startsWith(TOOL_SECTION_PREFIX)) {
-        toolGuidanceSnapshot.set(section.name, section.text)
-      }
-    }
     applyOverrides(assembly, {
       persona: stored?.persona,
       toolGuidance: stored?.toolGuidance,
@@ -227,42 +287,25 @@ export function apply(ctx: Context, config: Config) {
     return next()
   })
 
-  // The preview receiver: assemble (stored overrides apply through the
-  // waterfall), apply DRAFT overrides on top, then render leniently. The
-  // scope-less assembly cannot know per-agent values (`{{cwd}}` comes from the
-  // session), so the preview fills the default model selection where it exists
-  // and renders every other unresolved reference literally instead of failing.
+  // The preview receiver: assemble under the default preset's standing scope
+  // (stored overrides apply through the waterfall), apply DRAFT overrides on
+  // top, then render leniently. Even the scoped assembly cannot know per-agent
+  // values (`{{cwd}}` comes from the session), so the preview fills the default
+  // model selection where it exists and renders every other unresolved
+  // reference literally instead of failing.
   const receiver: SystemPromptEditorReceiver = {
     // The binding is assigned below — it must reference the receiver itself,
     // which does not exist until the object literal completes.
     typertRemote: undefined as unknown as TypertGatewayBinding<SystemPromptEditorReceiver>,
     async preview(drafts: SystemPromptDrafts): Promise<SystemPromptPreviewResult> {
-      const assembly = await ctx.systemPrompt.assemble()
+      const under = await previewScope(ctx)
+      const assembly = await ctx.systemPrompt.assemble(under.scope === undefined ? {} : { scope: under.scope })
       applyOverrides(assembly, drafts, { orderOf: knownSectionOrder })
       // Best-effort real values for the default model selection, then a lenient
       // render: anything still unresolved stays literal, so a stock deployment
       // persona (`{{model}}`/`{{cwd}}`) previews instead of erroring.
       for (const [name, value] of Object.entries(previewVariableFallbacks(ctx))) {
         if (assembly.variables[name] === undefined) assembly.variables[name] = value
-      }
-      // Replay the snapshotted per-tool guidance band when this scope-less
-      // assembly has no tool sections and no band replacement (no stored
-      // override, no draft): the tool band is per-agent, so this is the only
-      // faithful approximation, and it is what Load's tool-guidance card picks
-      // up when nothing is stored.
-      const hasToolBand = assembly.sections.some(section =>
-        section.name.startsWith(TOOL_SECTION_PREFIX) || section.name === TOOL_GUIDANCE_SECTION)
-      if (!hasToolBand && toolGuidanceSnapshot.size > 0) {
-        const anchor = assembly.sections.findIndex(section => {
-          const order = knownSectionOrder(section.name)
-          return order !== undefined && order > 100
-        })
-        const entries = [...toolGuidanceSnapshot.entries()].map(([name, text]) => ({ name, text }))
-        if (anchor < 0) {
-          assembly.sections.push(...entries)
-        } else {
-          assembly.sections.splice(anchor, 0, ...entries)
-        }
       }
       const stored = scope.get()
       const effective: SystemPromptStoredValues = {
@@ -279,12 +322,13 @@ export function apply(ctx: Context, config: Config) {
       })
       try {
         const rendered = renderPreviewPrompt(assembly)
-        return { rendered, sections, effective }
+        return { rendered, sections, effective, scope: previewScopeReport(under) }
       } catch (error) {
         return {
           rendered: '',
           sections,
           effective,
+          scope: previewScopeReport(under),
           error: error instanceof Error ? error.message : String(error),
         }
       }
